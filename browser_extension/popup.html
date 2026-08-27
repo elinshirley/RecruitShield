@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Recruitment Scam Detector</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div class="container">
+
+        <div class="header">
+            <h2>🛡️ Scam Detector</h2>
+            <p>Job Trust Analysis</p>
+        </div>
+
+
+        <!-- Analyze Button -->
+
+        <button id="analyzeBtn">
+            🔍 Analyze This Job
+        </button>
+
+
+        <!-- Loading -->
+
+        <div id="loading" class="hidden">
+            <p>🔄 Analyzing job posting...</p>
+        </div>
+
+
+        <!-- Result -->
+
+        <div id="result" class="hidden">
+
+            <div class="score-section">
+
+                <h3>Trust Score</h3>
+
+                <div id="scoreCircle">
+                    <span id="trustScore">--</span>
+                    <small>/100</small>
+                </div>
+
+            </div>
+
+
+            <!-- Verdict -->
+
+            <div id="verdictBox">
+
+                <span id="verdictEmoji"></span>
+
+                <strong id="verdictText"></strong>
+
+            </div>
+
+
+            <!-- Red Flags -->
+
+            <div class="flags-section">
+
+                <h3>🚩 Red Flags</h3>
+
+                <div id="redFlags">
+
+                    No analysis yet.
+
+                </div>
+
+            </div>
+
+
+            <!-- Recommendations -->
+
+            <div class="recommendations-section">
+
+                <h3>💡 Recommendations</h3>
+
+                <div id="recommendations"></div>
+
+            </div>
+
+        </div>
+
+
+        <!-- Error -->
+
+        <div id="error" class="hidden">
+
+            <p id="errorMessage"></p>
+
+        </div>
+
+
+        <div class="footer">
+
+            <small>
+                Recruitment Scam Detection System
+            </small>
+
+        </div>
+
+    </div>
+
+
+    <script src="popup.js"></script>
+
+</body>
+
+</html>

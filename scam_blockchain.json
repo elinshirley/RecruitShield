@@ -1,0 +1,22 @@
+[
+    {
+        "index": 0,
+        "timestamp": "2026-08-26 17:18:29.082417",
+        "previous_hash": "0",
+        "data": "GENESIS BLOCK",
+        "hash": "3abd9ca9f90c964152af1830aa0d785ab8e6653f20c05e81cd53713c164a83d2"
+    },
+    {
+        "index": 1,
+        "timestamp": "2026-08-26 17:24:03.442395",
+        "previous_hash": "3abd9ca9f90c964152af1830aa0d785ab8e6653f20c05e81cd53713c164a83d2",
+        "data": {
+            "content_hash": "a9131369cbe8e3e200a02b64fd4a2491634455af8f4f9f8eb81abaa6ad283490",
+            "source": "WhatsApp",
+            "category": "Recruitment Scam",
+            "confidence": 95,
+            "reported_at": "2026-08-26 17:24:03.442395"
+        },
+        "hash": "292c8bb5353d45f2f0ebe683135b4c461a9c3e559df87db49b2ce1285317d099"
+    }
+]

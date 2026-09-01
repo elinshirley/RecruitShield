@@ -1,4 +1,6 @@
-from flask import Flask, request, jsonify
+from sys import flags, platform
+
+from flask import Flask, request, jsonify, render_template
 import hashlib
 import json
 import os
@@ -8,7 +10,18 @@ from datetime import datetime
 from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
+from sympy import content
+from crowd_reports import check_company_reports, save_report
+from fraud_predictor import predict_scam_risk
+from pattern_updater import (
+    detect_new_scam_pattern,
+    update_patterns
+)
 
+# Import Dashboard module
+from dashboard import dashboard_bp, initialize_analytics_tables, log_scam_incident, aggregate_daily_trends
+
+update_patterns()
 try:
     import whois
     WHOIS_AVAILABLE = True
@@ -21,6 +34,9 @@ except ImportError:
 # ============================================================
 
 app = Flask(__name__)
+
+# Register dashboard blueprint
+app.register_blueprint(dashboard_bp)
 
 DATABASE = "scamshield.db"
 BLOCKCHAIN_FILE = "scam_blockchain.json"
@@ -115,6 +131,9 @@ def initialize_database():
 
     conn.commit()
     conn.close()
+
+    # Initialize analytics tables
+    initialize_analytics_tables()
 
 
 # ============================================================
@@ -328,25 +347,30 @@ def analyze_domain(url):
 # COMPANY & RECRUITER IDENTITY VERIFICATION
 # ============================================================
 
-def normalize_domain(domain):
+def normalize_domain(value):
     """
     Normalize a domain for comparison.
     """
-    if not domain:
+    if not value:
         return None
 
-    domain = domain.lower().strip()
+    value = value.lower().strip()
 
-    if "://" in domain:
-        domain = urlparse(domain).netloc
+    if "://" not in value:
+        value = "https://" + value
 
-    domain = domain.split("/")[0]
+    parsed = urlparse(value)
+
+    domain = parsed.netloc.lower()
+
+    # Remove port number
     domain = domain.split(":")[0]
 
+    # Remove www.
     if domain.startswith("www."):
         domain = domain[4:]
 
-    return domain
+    return domain or None
 
 
 def extract_email_domain(email):
@@ -356,19 +380,7 @@ def extract_email_domain(email):
     if not email or "@" not in email:
         return None
 
-    return normalize_domain(
-        email.split("@")[-1]
-    )
-
-
-def extract_url_domain(url):
-    """
-    Extract domain from URL.
-    """
-    try:
-        return normalize_domain(url)
-    except Exception:
-        return None
+    return email.split("@")[-1].lower().strip()
 
 
 def is_free_email_domain(domain):
@@ -382,7 +394,7 @@ def is_free_email_domain(domain):
     )
 
 
-def domains_match(email_domain, company_domain):
+def domains_match(recruiter_domain, company_domain):
     """
     Check whether recruiter email belongs
     to the claimed company domain.
@@ -390,16 +402,16 @@ def domains_match(email_domain, company_domain):
     Supports subdomains.
     """
 
-    email_domain = normalize_domain(email_domain)
+    recruiter_domain = normalize_domain(recruiter_domain)
     company_domain = normalize_domain(company_domain)
 
-    if not email_domain or not company_domain:
+    if not recruiter_domain or not company_domain:
         return False
 
-    if email_domain == company_domain:
+    if recruiter_domain == company_domain:
         return True
 
-    if email_domain.endswith("." + company_domain):
+    if recruiter_domain.endswith("." + company_domain):
         return True
 
     return False
@@ -433,9 +445,8 @@ def get_whois_information(domain):
         if creation_date:
 
             # Handle timezone-aware datetime
-            creation_date = creation_date.replace(
-                tzinfo=None
-            )
+            if getattr(creation_date, "tzinfo", None):
+                creation_date = creation_date.replace(tzinfo=None)
 
             age_days = (
                 datetime.now() - creation_date
@@ -463,7 +474,7 @@ def get_whois_information(domain):
     return result
 
 
-def validate_company_page(url, company_name=None):
+def validate_company_page(company_website, company_name=None):
     """
     Optional validation of company website.
 
@@ -480,16 +491,16 @@ def validate_company_page(url, company_name=None):
         "accessible": False,
         "company_name_found": False,
         "title": None,
-        "url": url
+        "url": company_website
     }
 
-    if not url:
+    if not company_website:
         return result
 
     try:
 
         response = requests.get(
-            url,
+            company_website,
             timeout=8,
             headers={
                 "User-Agent":
@@ -548,405 +559,6 @@ def verify_company_recruiter_identity(
     """
 
     result = {
-        "status": "UNKNOWN",
-        "risk": "LOW",
-        "recruiter_email": recruiter_email,
-        "recruiter_domain": None,
-        "company_domain": None,
-        "domain_match": None,
-        "free_email": False,
-        "whois": {},
-        "company_page": {},
-        "linkedin": {},
-        "flags": [],
-        "score_penalty": 0
-    }
-
-    # --------------------------------------------------------
-    # Recruiter email
-    # --------------------------------------------------------
-
-    recruiter_domain = extract_email_domain(
-        recruiter_email
-    )
-
-    result["recruiter_domain"] = recruiter_domain
-
-    if not recruiter_domain:
-
-        result["status"] = "INSUFFICIENT DATA"
-
-        return result
-
-    # --------------------------------------------------------
-    # Free email
-    # --------------------------------------------------------
-
-    if is_free_email_domain(recruiter_domain):
-
-        result["free_email"] = True
-
-        result["flags"].append({
-            "risk": "MEDIUM",
-            "reason":
-                f"Recruiter uses a free email provider "
-                f"({recruiter_domain}) instead of a "
-                f"company-specific domain.",
-            "score_penalty": 8
-        })
-
-        result["score_penalty"] += 8
-
-    # --------------------------------------------------------
-    # Company domain
-    # --------------------------------------------------------
-
-    company_domain = extract_url_domain(
-        company_website
-    )
-
-    result["company_domain"] = company_domain
-
-    if not company_domain:
-
-        result["status"] = "INSUFFICIENT DATA"
-
-        return result
-
-    # --------------------------------------------------------
-    # Domain comparison
-    # --------------------------------------------------------
-
-    match = domains_match(
-        recruiter_domain,
-        company_domain
-    )
-
-    result["domain_match"] = match
-
-    if match:
-
-        result["status"] = "VERIFIED"
-
-        result["risk"] = "LOW"
-
-    else:
-
-        result["status"] = "DOMAIN MISMATCH"
-
-        result["risk"] = "HIGH"
-
-        result["flags"].append({
-            "risk": "HIGH",
-            "reason":
-                f"Recruiter email domain "
-                f"'{recruiter_domain}' does not match "
-                f"the claimed company domain "
-                f"'{company_domain}'.",
-            "score_penalty": 25
-        })
-
-        result["score_penalty"] += 25
-
-    # --------------------------------------------------------
-    # WHOIS verification
-    # --------------------------------------------------------
-
-    whois_data = get_whois_information(
-        recruiter_domain
-    )
-
-    result["whois"] = whois_data
-
-    age = whois_data.get("age_days")
-
-    if age is not None:
-
-        if age < 30:
-
-            result["flags"].append({
-                "risk": "HIGH",
-                "reason":
-                    f"Recruiter domain "
-                    f"'{recruiter_domain}' was registered "
-                    f"only {age} days ago.",
-                "score_penalty": 20
-            })
-
-            result["score_penalty"] += 20
-
-        elif age < 90:
-
-            result["flags"].append({
-                "risk": "MEDIUM",
-                "reason":
-                    f"Recruiter domain "
-                    f"'{recruiter_domain}' is relatively "
-                    f"new ({age} days old).",
-                "score_penalty": 10
-            })
-
-            result["score_penalty"] += 10
-
-    # --------------------------------------------------------
-    # Company website validation
-    # --------------------------------------------------------
-
-    if company_website:
-
-        result["company_page"] = (
-            validate_company_page(
-                company_website,
-                company_name
-            )
-        )
-
-    # --------------------------------------------------------
-    # LinkedIn validation
-    # --------------------------------------------------------
-
-    if linkedin_url:
-
-        linkedin_domain = normalize_domain(
-            linkedin_url
-        )
-
-        if linkedin_domain == "linkedin.com":
-
-            result["linkedin"] = {
-                "provided": True,
-                "valid_domain": True,
-                "url": linkedin_url
-            }
-
-        elif linkedin_domain and linkedin_domain.endswith(
-            ".linkedin.com"
-        ):
-
-            result["linkedin"] = {
-                "provided": True,
-                "valid_domain": True,
-                "url": linkedin_url
-            }
-
-        else:
-
-            result["linkedin"] = {
-                "provided": True,
-                "valid_domain": False,
-                "url": linkedin_url
-            }
-
-            result["flags"].append({
-                "risk": "MEDIUM",
-                "reason":
-                    "The supplied LinkedIn URL does not "
-                    "belong to linkedin.com.",
-                "score_penalty": 10
-            })
-
-            result["score_penalty"] += 10
-
-    # --------------------------------------------------------
-    # Final risk
-    # --------------------------------------------------------
-
-    if result["domain_match"] is True and not result["flags"]:
-
-        result["status"] = "VERIFIED"
-        result["risk"] = "LOW"
-
-    elif result["domain_match"] is False:
-
-        result["status"] = "DOMAIN MISMATCH"
-        result["risk"] = "HIGH"
-
-    return result
-
-# ============================================================
-# COMPANY & RECRUITER IDENTITY VERIFICATION
-# ============================================================
-
-def normalize_domain(value):
-    """Normalize a URL or domain for comparison."""
-
-    if not value:
-        return None
-
-    value = value.lower().strip()
-
-    if "://" not in value:
-        value = "https://" + value
-
-    parsed = urlparse(value)
-
-    domain = parsed.netloc.lower()
-
-    # Remove port number
-    domain = domain.split(":")[0]
-
-    # Remove www.
-    if domain.startswith("www."):
-        domain = domain[4:]
-
-    return domain or None
-
-
-def extract_email_domain(email):
-    """Extract domain from an email address."""
-
-    if not email or "@" not in email:
-        return None
-
-    return email.split("@")[-1].lower().strip()
-
-
-def domains_match(recruiter_domain, company_domain):
-    """
-    Check whether recruiter email domain matches
-    the claimed company domain.
-    """
-
-    if not recruiter_domain or not company_domain:
-        return False
-
-    recruiter_domain = normalize_domain(recruiter_domain)
-    company_domain = normalize_domain(company_domain)
-
-    if recruiter_domain == company_domain:
-        return True
-
-    # Allow legitimate subdomains
-    if recruiter_domain.endswith("." + company_domain):
-        return True
-
-    return False
-
-
-def get_whois_information(domain):
-    """Get basic WHOIS information."""
-
-    result = {
-        "available": WHOIS_AVAILABLE,
-        "domain": domain,
-        "creation_date": None,
-        "age_days": None,
-        "registrar": None
-    }
-
-    if not WHOIS_AVAILABLE or not domain:
-        return result
-
-    try:
-        domain_info = whois.whois(domain)
-
-        creation_date = domain_info.creation_date
-
-        if isinstance(creation_date, list):
-            creation_date = creation_date[0]
-
-        if creation_date:
-            # Avoid timezone issues
-            if getattr(creation_date, "tzinfo", None):
-                creation_date = creation_date.replace(tzinfo=None)
-
-            result["creation_date"] = str(creation_date)
-
-            result["age_days"] = (
-                datetime.now() - creation_date
-            ).days
-
-        registrar = getattr(domain_info, "registrar", None)
-
-        if registrar:
-            result["registrar"] = str(registrar)
-
-    except Exception as error:
-        result["error"] = str(error)
-
-    return result
-
-
-def validate_company_page(company_website, company_name=None):
-    """
-    Optional basic validation of the claimed company website.
-
-    This checks accessibility and whether the company name
-    appears in the page title or visible page text.
-    """
-
-    result = {
-        "checked": False,
-        "accessible": False,
-        "company_name_found": False,
-        "title": None,
-        "url": company_website
-    }
-
-    if not company_website:
-        return result
-
-    try:
-        response = requests.get(
-            company_website,
-            timeout=8,
-            headers={
-                "User-Agent":
-                    "RecruitShield/1.0 Identity Verification"
-            }
-        )
-
-        result["checked"] = True
-        result["status_code"] = response.status_code
-
-        if response.status_code != 200:
-            return result
-
-        result["accessible"] = True
-
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
-
-        title = ""
-
-        if soup.title and soup.title.string:
-            title = soup.title.string.strip()
-
-        result["title"] = title
-
-        if company_name:
-            page_text = soup.get_text(
-                " ",
-                strip=True
-            ).lower()
-
-            company_name_lower = company_name.lower()
-
-            if (
-                company_name_lower in title.lower()
-                or company_name_lower in page_text
-            ):
-                result["company_name_found"] = True
-
-    except Exception as error:
-        result["error"] = str(error)
-
-    return result
-
-
-def verify_company_recruiter_identity(
-    recruiter_email=None,
-    company_website=None,
-    company_name=None,
-    linkedin_url=None
-):
-    """
-    Main identity verification engine.
-    """
-
-    result = {
         "status": "NOT CHECKED",
         "risk": "UNKNOWN",
         "recruiter_email": recruiter_email,
@@ -979,7 +591,7 @@ def verify_company_recruiter_identity(
     # 2. Free email detection
     # ----------------------------------------
 
-    if recruiter_domain in FREE_EMAIL_DOMAINS:
+    if is_free_email_domain(recruiter_domain):
 
         result["free_email"] = True
 
@@ -1151,6 +763,8 @@ def verify_company_recruiter_identity(
         result["risk"] = "HIGH"
 
     return result
+
+
 # ============================================================
 # SCAM REGISTRY CHECK
 # ============================================================
@@ -1195,7 +809,8 @@ def analyze_content(
     recruiter_email=None,
     company_website=None,
     company_name=None,
-    linkedin_url=None
+    linkedin_url=None,
+    platform="unknown"
 ):
     """
     Main AI/rule-based trust analysis engine.
@@ -1212,12 +827,79 @@ def analyze_content(
     score = 100
     flags = []
     recommendations = []
+
+    # --------------------------------------------------------
+    # Predictive Fraud Analytics
+    # --------------------------------------------------------
+
+    predicted_risk = predict_scam_risk(platform)
+
+    if predicted_risk == "Very High":
+
+        score -= 20
+
+        flags.append({
+            "risk": "HIGH",
+            "reason": f"AI predicts a scam spike on {platform}.",
+            "score_penalty": 20
+        })
+
+    elif predicted_risk == "High":
+
+        score -= 15
+
+        flags.append({
+            "risk": "MEDIUM",
+            "reason": f"Fraud activity is increasing on {platform}.",
+            "score_penalty": 15
+        })
+
+    elif predicted_risk == "Medium":
+
+        score -= 8
+
+        flags.append({
+            "risk": "LOW",
+            "reason": f"Some fraud activity detected on {platform}.",
+            "score_penalty": 8
+        })
+
+    # --------------------------------------------------------
+    # Identity verification
+    # --------------------------------------------------------
+
     identity_result = {
-    "status": "NOT CHECKED",
-    "risk": "UNKNOWN",
-    "score_penalty": 0,
-    "flags": []
-}
+        "status": "NOT CHECKED",
+        "risk": "UNKNOWN",
+        "score_penalty": 0,
+        "flags": []
+    }
+
+    if recruiter_email and company_website:
+        identity_result = verify_company_recruiter_identity(
+            recruiter_email=recruiter_email,
+            company_website=company_website,
+            company_name=company_name,
+            linkedin_url=linkedin_url
+        )
+
+        score -= identity_result["score_penalty"]
+
+        flags.extend(identity_result["flags"])
+
+    # --------------------------------------------------------
+    # Emerging Scam Pattern Detection
+    # --------------------------------------------------------
+
+    if detect_new_scam_pattern(content):
+
+        score -= 15
+
+        flags.append({
+            "risk": "HIGH",
+            "reason": "Emerging scam pattern detected from updated fraud intelligence feeds.",
+            "score_penalty": 15
+        })
 
     # --------------------------------------------------------
     # 1. Check risky keywords
@@ -1322,7 +1004,7 @@ def analyze_content(
             flags.append(flag)
 
     # --------------------------------------------------------
-    # 7. Check scam registry
+    # 6. Check scam registry
     # --------------------------------------------------------
 
     registry_result = check_scam_registry(content)
@@ -1386,38 +1068,30 @@ def analyze_content(
             "color": "red"
         }
 
-        recommendations.append(
-            "Do not send money or provide sensitive personal or banking information."
-        )
+        recommendations.append("Do not send money or provide sensitive personal or banking information.")
 
-        recommendations.append(
-            "Verify the company through its official website and contact channels."
-        )
+        recommendations.append("Verify the company through its official website and contact channels.")
 
-        recommendations.append(
-            "Consider reporting this message to the Scam Registry."
-        )
+        recommendations.append("Consider reporting this message to the Scam Registry.")
 
     return {
-    "trust_score": score,
-    "verdict": verdict,
-    "red_flags": flags,
-    "recommendations": recommendations,
-    "registry_match": registry_result["found"],
-    "identity_verification": identity_result,
-    "analyzed_at": str(datetime.utcnow())
-}
+        "trust_score": score,
+        "verdict": verdict,
+        "red_flags": flags,
+        "recommendations": recommendations,
+        "registry_match": registry_result["found"],
+        "identity_verification": identity_result,
+        "analyzed_at": str(datetime.utcnow())
+    }
+
 
 # ============================================================
 # SAVE ANALYSIS HISTORY
 # ============================================================
 
 def save_analysis(content, source, result):
-
     conn = get_db()
-
     cursor = conn.cursor()
-
     cursor.execute("""
         INSERT INTO analysis_history
         (
@@ -1437,9 +1111,7 @@ def save_analysis(content, source, result):
         json.dumps(result["red_flags"]),
         str(datetime.utcnow())
     ))
-
     conn.commit()
-
     conn.close()
 
 
@@ -1466,18 +1138,47 @@ def analyze():
         "manual"
     )
 
+    platform_name = data.get("platform", "unknown")
+    company_name = data.get("company_name")
+    recruiter_email = data.get("recruiter_email")
+    country = data.get("country")
+    region = data.get("region")
+    city = data.get("city")
+
     result = analyze_content(
-    content=content,
-    recruiter_email=data.get("recruiter_email"),
-    company_website=data.get("company_website"),
-    company_name=data.get("company_name"),
-    linkedin_url=data.get("linkedin_url")
-)
+        content=content,
+        recruiter_email=recruiter_email,
+        company_website=data.get("company_website"),
+        company_name=company_name,
+        linkedin_url=data.get("linkedin_url"),
+        platform=platform_name
+    )
 
     save_analysis(
         content,
         source,
         result
+    )
+
+    # Log to analytics dashboard
+    risk_level = "CRITICAL" if result["trust_score"] < 20 else (
+        "HIGH" if result["trust_score"] < 50 else (
+            "MEDIUM" if result["trust_score"] < 80 else "LOW"
+        )
+    )
+
+    log_scam_incident(
+        content=content,
+        platform=platform_name,
+        country=country,
+        region=region,
+        city=city,
+        company_name=company_name,
+        recruiter_email=recruiter_email,
+        trust_score=result["trust_score"],
+        risk_level=risk_level,
+        category="recruitment scam",
+        reported_by=source
     )
 
     return jsonify({
@@ -1591,11 +1292,48 @@ def report_scam():
 
     conn.close()
 
+    # Log to analytics
+    log_scam_incident(
+        content=content,
+        platform=data.get("platform", "unknown"),
+        country=data.get("country"),
+        region=data.get("region"),
+        city=data.get("city"),
+        company_name=data.get("company_name"),
+        recruiter_email=data.get("recruiter_email"),
+        trust_score=0,
+        risk_level="CRITICAL",
+        category=category,
+        reported_by=source
+    )
+
     return jsonify({
         "success": True,
         "message": "Scam report successfully added to the immutable registry.",
         "report_id": report_id,
         "blockchain_block": block
+    })
+
+
+@app.route("/api/community-report", methods=["POST"])
+def community_report():
+
+    data = request.get_json()
+
+    company_name = data.get("company_name")
+    reason = data.get("reason")
+
+    if not company_name or not reason:
+        return jsonify({
+            "success": False,
+            "error": "company_name and reason are required"
+        }), 400
+
+    save_report(company_name, reason)
+
+    return jsonify({
+        "success": True,
+        "message": "Community report added"
     })
 
 
@@ -1632,6 +1370,7 @@ def get_blockchain():
         "blocks": blockchain
     })
 
+
 # ============================================================
 # BROWSER EXTENSION API
 # ============================================================
@@ -1661,21 +1400,25 @@ def extension_analyze():
 
     content = data["content"]
 
-    platform = data.get(
+    platform_name = data.get(
         "platform",
         "unknown"
     )
 
-    result = analyze_content(content)
+    result = analyze_content(
+        content,
+        platform=platform_name
+    )
 
     return jsonify({
         "success": True,
-        "platform": platform,
+        "platform": platform_name,
         "trust_score": result["trust_score"],
         "verdict": result["verdict"],
         "red_flags": result["red_flags"],
         "recommendations": result["recommendations"]
     })
+
 
 # ============================================================
 # COMPANY & RECRUITER IDENTITY API
@@ -1726,6 +1469,8 @@ def verify_identity():
         "success": True,
         "identity_verification": result
     })
+
+
 # ============================================================
 # TELEGRAM BOT WEBHOOK
 # ============================================================
@@ -1762,7 +1507,7 @@ def telegram_webhook():
                 "message": "No text received."
             })
 
-        result = analyze_content(text)
+        result = analyze_content(text, platform="telegram")
 
         reply = format_bot_response(result)
 
@@ -1771,9 +1516,6 @@ def telegram_webhook():
         print(f"Chat ID: {chat_id}")
 
         print(reply)
-
-        # In production:
-        # Send reply using Telegram Bot API.
 
         return jsonify({
             "success": True,
@@ -1823,7 +1565,8 @@ def whatsapp_webhook():
             })
 
         result = analyze_content(
-            incoming_message
+            incoming_message,
+            platform="whatsapp"
         )
 
         reply = format_bot_response(result)
@@ -1906,7 +1649,8 @@ def home():
             "Blockchain Scam Registry",
             "Browser Extension API",
             "WhatsApp Integration",
-            "Telegram Integration"
+            "Telegram Integration",
+            "Web Dashboard Analytics"
         ]
     })
 
@@ -1920,6 +1664,9 @@ if __name__ == "__main__":
     initialize_database()
 
     load_blockchain()
+
+    # Aggregate trends daily
+    aggregate_daily_trends()
 
     print("=" * 60)
 
@@ -1954,6 +1701,20 @@ if __name__ == "__main__":
     print("POST /webhook/telegram")
 
     print("POST /webhook/whatsapp")
+
+    print("\nDashboard Analytics:")
+
+    print("GET /dashboard/api/summary")
+
+    print("GET /dashboard/api/heatmap/geographic")
+
+    print("GET /dashboard/api/heatmap/platform")
+
+    print("GET /dashboard/api/recruiter-trust-scores")
+
+    print("GET /dashboard/api/fraud-trends")
+
+    print("GET /dashboard/")
 
     print("=" * 60)
 

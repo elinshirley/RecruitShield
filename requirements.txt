@@ -1,11 +1,5 @@
 streamlit
-Flask==2.3.0
-Werkzeug==2.3.0
-requests==2.31.0
-beautifulsoup4==4.12.0
-python-whois==0.9.4
-python-telegram-bot==20.3
-python-dotenv==1.0.0
-sympy==1.12
+requests
+beautifulsoup4
+python-dotenv
 Pillow
-gunicorn==21.2.0

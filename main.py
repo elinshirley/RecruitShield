@@ -1,5 +1,6 @@
 from sys import flags, platform
 import streamlit as st
+st.title("RecruitShield AI Scam Detection & Verification")
 from flask import Flask, request, jsonify, render_template
 import hashlib
 import json
